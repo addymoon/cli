@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MakeNowJust/heredoc"
 	"github.com/cli/cli/internal/ghrepo"
 	"github.com/cli/cli/pkg/cmd/run/shared"
 	"github.com/cli/cli/pkg/cmdutil"
@@ -35,6 +36,29 @@ func TestNewCmdView(t *testing.T) {
 			wants: ViewOptions{
 				Prompt: true,
 			},
+		},
+		{
+			name: "web tty",
+			tty:  true,
+			cli:  "--web",
+			wants: ViewOptions{
+				Prompt: true,
+				Web:    true,
+			},
+		},
+		{
+			name: "web nontty",
+			cli:  "1234 --web",
+			wants: ViewOptions{
+				Web:   true,
+				RunID: "1234",
+			},
+		},
+		{
+			name:     "disallow web and log",
+			tty:      true,
+			cli:      "-w --log",
+			wantsErr: true,
 		},
 		{
 			name: "exit status",
@@ -125,15 +149,16 @@ func TestNewCmdView(t *testing.T) {
 }
 
 func TestViewRun(t *testing.T) {
-
 	tests := []struct {
-		name      string
-		httpStubs func(*httpmock.Registry)
-		askStubs  func(*prompt.AskStubber)
-		opts      *ViewOptions
-		tty       bool
-		wantErr   bool
-		wantOut   string
+		name       string
+		httpStubs  func(*httpmock.Registry)
+		askStubs   func(*prompt.AskStubber)
+		opts       *ViewOptions
+		tty        bool
+		wantErr    bool
+		wantOut    string
+		browsedURL string
+		errMsg     string
 	}{
 		{
 			name: "associate with PR",
@@ -146,6 +171,9 @@ func TestViewRun(t *testing.T) {
 				reg.Register(
 					httpmock.REST("GET", "repos/OWNER/REPO/actions/runs/3"),
 					httpmock.JSONResponse(shared.SuccessfulRun))
+				reg.Register(
+					httpmock.REST("GET", "repos/OWNER/REPO/actions/runs/3/artifacts"),
+					httpmock.StringResponse(`{}`))
 				reg.Register(
 					httpmock.GraphQL(`query PullRequestForRun`),
 					httpmock.StringResponse(`{"data": {
@@ -183,6 +211,9 @@ func TestViewRun(t *testing.T) {
 					httpmock.REST("GET", "repos/OWNER/REPO/actions/runs/1234"),
 					httpmock.JSONResponse(shared.FailedRun))
 				reg.Register(
+					httpmock.REST("GET", "repos/OWNER/REPO/actions/runs/1234/artifacts"),
+					httpmock.StringResponse(`{}`))
+				reg.Register(
 					httpmock.GraphQL(`query PullRequestForRun`),
 					httpmock.StringResponse(``))
 				reg.Register(
@@ -200,6 +231,48 @@ func TestViewRun(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "with artifacts",
+			opts: &ViewOptions{
+				RunID: "3",
+			},
+			httpStubs: func(reg *httpmock.Registry) {
+				reg.Register(
+					httpmock.REST("GET", "repos/OWNER/REPO/actions/runs/3"),
+					httpmock.JSONResponse(shared.SuccessfulRun))
+				reg.Register(
+					httpmock.REST("GET", "repos/OWNER/REPO/actions/runs/3/artifacts"),
+					httpmock.JSONResponse(map[string][]shared.Artifact{
+						"artifacts": {
+							shared.Artifact{Name: "artifact-1", Expired: false},
+							shared.Artifact{Name: "artifact-2", Expired: true},
+							shared.Artifact{Name: "artifact-3", Expired: false},
+						},
+					}))
+				reg.Register(
+					httpmock.GraphQL(`query PullRequestForRun`),
+					httpmock.StringResponse(``))
+				reg.Register(
+					httpmock.REST("GET", "runs/3/jobs"),
+					httpmock.JSONResponse(shared.JobsPayload{}))
+			},
+			wantOut: heredoc.Doc(`
+				
+				✓ trunk successful · 3
+				Triggered via push about 59 minutes ago
+				
+				JOBS
+				
+				
+				ARTIFACTS
+				artifact-1
+				artifact-2 (expired)
+				artifact-3
+				
+				For more information about a job, try: gh run view --job=<job-id>
+				view this run on GitHub: runs/3
+			`),
+		},
+		{
 			name: "exit status, successful run",
 			opts: &ViewOptions{
 				RunID:      "3",
@@ -209,6 +282,9 @@ func TestViewRun(t *testing.T) {
 				reg.Register(
 					httpmock.REST("GET", "repos/OWNER/REPO/actions/runs/3"),
 					httpmock.JSONResponse(shared.SuccessfulRun))
+				reg.Register(
+					httpmock.REST("GET", "repos/OWNER/REPO/actions/runs/3/artifacts"),
+					httpmock.StringResponse(`{}`))
 				reg.Register(
 					httpmock.GraphQL(`query PullRequestForRun`),
 					httpmock.StringResponse(``))
@@ -237,6 +313,9 @@ func TestViewRun(t *testing.T) {
 				reg.Register(
 					httpmock.REST("GET", "repos/OWNER/REPO/actions/runs/1234"),
 					httpmock.JSONResponse(shared.FailedRun))
+				reg.Register(
+					httpmock.REST("GET", "repos/OWNER/REPO/actions/runs/1234/artifacts"),
+					httpmock.StringResponse(`{}`))
 				reg.Register(
 					httpmock.GraphQL(`query PullRequestForRun`),
 					httpmock.StringResponse(``))
@@ -269,6 +348,9 @@ func TestViewRun(t *testing.T) {
 				reg.Register(
 					httpmock.REST("GET", "repos/OWNER/REPO/actions/runs/3"),
 					httpmock.JSONResponse(shared.SuccessfulRun))
+				reg.Register(
+					httpmock.REST("GET", "repos/OWNER/REPO/actions/runs/3/artifacts"),
+					httpmock.StringResponse(`{}`))
 				reg.Register(
 					httpmock.GraphQL(`query PullRequestForRun`),
 					httpmock.StringResponse(``))
@@ -345,6 +427,94 @@ func TestViewRun(t *testing.T) {
 			wantOut: "it's a log\nfor this job\nbeautiful log\n",
 		},
 		{
+			name: "interactive with run log",
+			tty:  true,
+			opts: &ViewOptions{
+				Prompt: true,
+				Log:    true,
+			},
+			httpStubs: func(reg *httpmock.Registry) {
+				reg.Register(
+					httpmock.REST("GET", "repos/OWNER/REPO/actions/runs"),
+					httpmock.JSONResponse(shared.RunsPayload{
+						WorkflowRuns: shared.TestRuns,
+					}))
+				reg.Register(
+					httpmock.REST("GET", "repos/OWNER/REPO/actions/runs/3"),
+					httpmock.JSONResponse(shared.SuccessfulRun))
+				reg.Register(
+					httpmock.REST("GET", "runs/3/jobs"),
+					httpmock.JSONResponse(shared.JobsPayload{
+						Jobs: []shared.Job{
+							shared.SuccessfulJob,
+							shared.FailedJob,
+						},
+					}))
+				reg.Register(
+					httpmock.REST("GET", "repos/OWNER/REPO/actions/runs/3/logs"),
+					httpmock.FileResponse("./fixtures/run_log.zip"))
+			},
+			askStubs: func(as *prompt.AskStubber) {
+				as.StubOne(2)
+				as.StubOne(0)
+			},
+			wantOut: expectedRunLogOutput,
+		},
+		{
+			name: "noninteractive with run log",
+			tty:  true,
+			opts: &ViewOptions{
+				RunID: "3",
+				Log:   true,
+			},
+			httpStubs: func(reg *httpmock.Registry) {
+				reg.Register(
+					httpmock.REST("GET", "repos/OWNER/REPO/actions/runs/3"),
+					httpmock.JSONResponse(shared.SuccessfulRun))
+				reg.Register(
+					httpmock.REST("GET", "repos/OWNER/REPO/actions/runs/3/logs"),
+					httpmock.FileResponse("./fixtures/run_log.zip"))
+			},
+			wantOut: expectedRunLogOutput,
+		},
+		{
+			name: "run log but run is not done",
+			tty:  true,
+			opts: &ViewOptions{
+				RunID: "2",
+				Log:   true,
+			},
+			httpStubs: func(reg *httpmock.Registry) {
+				reg.Register(
+					httpmock.REST("GET", "repos/OWNER/REPO/actions/runs/2"),
+					httpmock.JSONResponse(shared.TestRun("in progress", 2, shared.InProgress, "")))
+			},
+			wantErr: true,
+			errMsg:  "run 2 is still in progress; logs will be available when it is complete",
+		},
+		{
+			name: "job log but job is not done",
+			tty:  true,
+			opts: &ViewOptions{
+				JobID: "20",
+				Log:   true,
+			},
+			httpStubs: func(reg *httpmock.Registry) {
+				reg.Register(
+					httpmock.REST("GET", "repos/OWNER/REPO/actions/jobs/20"),
+					httpmock.JSONResponse(shared.Job{
+						ID:     20,
+						Status: shared.InProgress,
+						RunID:  2,
+					}))
+				reg.Register(
+					httpmock.REST("GET", "repos/OWNER/REPO/actions/runs/2"),
+					httpmock.JSONResponse(shared.TestRun("in progress", 2, shared.InProgress, "")))
+			},
+			wantErr: true,
+			errMsg:  "job 20 is still in progress; logs will be available when it is complete",
+		},
+		{
 			name: "noninteractive with job",
 			opts: &ViewOptions{
 				JobID: "10",
@@ -377,6 +547,9 @@ func TestViewRun(t *testing.T) {
 				reg.Register(
 					httpmock.REST("GET", "repos/OWNER/REPO/actions/runs/3"),
 					httpmock.JSONResponse(shared.SuccessfulRun))
+				reg.Register(
+					httpmock.REST("GET", "repos/OWNER/REPO/actions/runs/3/artifacts"),
+					httpmock.StringResponse(`{}`))
 				reg.Register(
 					httpmock.REST("GET", "runs/3/jobs"),
 					httpmock.JSONResponse(shared.JobsPayload{
@@ -431,6 +604,39 @@ func TestViewRun(t *testing.T) {
 			},
 			wantOut: "\n✓ trunk successful · 3\nTriggered via push about 59 minutes ago\n\n✓ cool job in 4m34s (ID 10)\n  ✓ fob the barz\n  ✓ barz the fob\n\nTo see the full job log, try: gh run view --log --job=10\nview this run on GitHub: runs/3\n",
 		},
+		{
+			name: "web run",
+			tty:  true,
+			opts: &ViewOptions{
+				RunID: "3",
+				Web:   true,
+			},
+			httpStubs: func(reg *httpmock.Registry) {
+				reg.Register(
+					httpmock.REST("GET", "repos/OWNER/REPO/actions/runs/3"),
+					httpmock.JSONResponse(shared.SuccessfulRun))
+			},
+			browsedURL: "runs/3",
+			wantOut:    "Opening runs/3 in your browser.\n",
+		},
+		{
+			name: "web job",
+			tty:  true,
+			opts: &ViewOptions{
+				JobID: "10",
+				Web:   true,
+			},
+			httpStubs: func(reg *httpmock.Registry) {
+				reg.Register(
+					httpmock.REST("GET", "repos/OWNER/REPO/actions/jobs/10"),
+					httpmock.JSONResponse(shared.SuccessfulJob))
+				reg.Register(
+					httpmock.REST("GET", "repos/OWNER/REPO/actions/runs/3"),
+					httpmock.JSONResponse(shared.SuccessfulRun))
+			},
+			browsedURL: "jobs/10?check_suite_focus=true",
+			wantOut:    "Opening jobs/10 in your browser.\n",
+		},
 	}
 
 	for _, tt := range tests {
@@ -458,10 +664,16 @@ func TestViewRun(t *testing.T) {
 			tt.askStubs(as)
 		}
 
+		browser := &cmdutil.TestBrowser{}
+		tt.opts.Browser = browser
+
 		t.Run(tt.name, func(t *testing.T) {
 			err := runView(tt.opts)
 			if tt.wantErr {
 				assert.Error(t, err)
+				if tt.errMsg != "" {
+					assert.Equal(t, tt.errMsg, err.Error())
+				}
 				if !tt.opts.ExitStatus {
 					return
 				}
@@ -470,7 +682,25 @@ func TestViewRun(t *testing.T) {
 				assert.NoError(t, err)
 			}
 			assert.Equal(t, tt.wantOut, stdout.String())
+			if tt.browsedURL != "" {
+				assert.Equal(t, tt.browsedURL, browser.BrowsedURL())
+			}
 			reg.Verify(t)
 		})
 	}
 }
+
+var expectedRunLogOutput = heredoc.Doc(`
+job1	step1	log line 1
+job1	step1	log line 2
+job1	step1	log line 3
+job1	step2	log line 1
+job1	step2	log line 2
+job1	step2	log line 3
+job2	step1	log line 1
+job2	step1	log line 2
+job2	step1	log line 3
+job2	step2	log line 1
+job2	step2	log line 2
+job2	step2	log line 3
+`)
